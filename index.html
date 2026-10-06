@@ -55,7 +55,10 @@
                 { role: "person", text: "Same idea." },
                 { role: "ai", text: "Why?" },
                 { role: "person", text: "[Student elaborates on the generalization]" },
-                { role: "ai", text: "Let me repeat what I learned from you. [Repeats the student's explanation]. Can you tell me if this is true or false? The probability of going from E to E in two steps is 0.09?" }
+                { role: "ai", text: "Let me repeat what I learned from you. [Repeats the student's explanation]." },
+                { role: "ai", text: "Now I tried one myself. Can you tell me if my solution is true or false?\n\nProblem: What is the probability of going from E to E in two steps?\n\nMy solution: There are two paths, E → E → E and E → A → E.\nE → E → E is 0.3*0.3 = 0.09.\nE → A → E is 0.7*0.6 = 0.42.\nI multiply the two paths: 0.09*0.42 ≈ 0.04." },
+                { role: "person", text: "False, there are two mistakes.\n\n1. The second jump of E → A → E goes from A to E. That is 0.4, not 0.6. So this path is 0.7*0.4 = 0.28.\n\n2. The two paths are alternatives that cannot happen at the same time, so you add them instead of multiplying: 0.09 + 0.28 = 0.37." },
+                { role: "ai", text: "So the second jump has to use the arrow from A to E, and different paths are added, not multiplied. Then the probability of going from E to E in two steps is 0.37. You found both mistakes." }
             ],
             "no_knowledge": [
                 { role: "ai", text: "Explain to me how to calculate the probability of going from A to E in two steps." },
