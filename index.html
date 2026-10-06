@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markov Teach-Back</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f3f4f6; }
+        .fade-in { animation: fadeIn 0.5s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- DATA: Chat Scenarios ---
+        const scenarios = {
+            "empty": [
+                { role: "ai", text: "Hey! I missed the lecture on Markov Chains. Could you help me understand them?" }
+            ],
+            "wrong": [
+                { role: "ai", text: "Explain to me how to calculate the probability of going from A to E in two steps." },
+                { role: "person", text: "To calculate the two-step probability, take the one-step probability and square it." },
+                { role: "ai", text: "Explain with an example, why square?" },
+                { role: "person", text: "It is two steps, so I use the same probability twice." },
+                { role: "ai", text: "Can you provide me an example with the E/A chain please?" },
+                { role: "person", text: "From A to E is 0.4, 0.4*0.4 = 0.16, the two-step probability is 0.16." },
+                { role: "ai", text: "I am trying to follow the chain step by step. Where is the chain after the first jump of your example? And from which state does the second jump start? Hint: look at the arrows in the graph." },
+                { role: "person", text: "After the first jump it is in E. Oh, so the second jump starts in E, not in A. Then it is A → E → E, which is 0.4*0.3 = 0.12." },
+                { role: "ai", text: "Is that the only way to be in E after two jumps?" },
+                { role: "person", text: "No, the chain can also stay in A first and then jump: A → A → E, that is 0.6*0.4 = 0.24." },
+                { role: "ai", text: "Now you have two ways. What do you do with them?" },
+                { role: "person", text: "They cannot happen at the same time, so I add them: 0.12 + 0.24 = 0.36." },
+                { role: "ai", text: "Can you please generalize it?" },
+                { role: "person", text: "Σ p_ik*p_kj over all states k in between (or simpler: entry (i, j) of P*P)" },
+                { role: "ai", text: "Let me repeat what I learned from you. (Repeats the student's explanation). Can you tell me if this is true or false? The probability of going from E to E in two steps is 0.09?" },
+                { role: "person", text: "True" },
+                { role: "ai", text: "Which ways lead from E back to E in two jumps?" }
+            ],
+            "correct": [
+                { role: "ai", text: "Explain to me how to calculate the probability of going from A to E in two steps." },
+                { role: "person", text: "To calculate the two-step probability, take every path from A to E with one state in between, multiply the probabilities along each path, then add the paths." },
+                { role: "ai", text: "Explain with an example, why add?" },
+                { role: "person", text: "From A to E in two steps the chain can go A → E → E or A → A → E. These are two different ways that cannot happen at the same time. 0.4*0.3 = 0.12 and 0.6*0.4 = 0.24. The two-step probability is 0.36." },
+                { role: "ai", text: "If I understand you right, you multiply along each path and add over the state in between. Is this correct?" },
+                { role: "person", text: "Yes." },
+                { role: "ai", text: "What about if I have more states?" },
+                { role: "person", text: "Same idea." },
+                { role: "ai", text: "Why?" },
+                { role: "person", text: "[Student elaborates on the generalization]" },
+                { role: "ai", text: "Let me repeat what I learned from you. [Repeats the student's explanation]. Can you tell me if this is true or false? The probability of going from E to E in two steps is 0.09?" }
+            ],
+            "no_knowledge": [
+                { role: "ai", text: "Explain to me how to calculate the probability of going from A to E in two steps." },
+                { role: "person", text: "I can't remember how to calculate it. It had something to do with multiplication and addition." },
+                { role: "ai", text: "Multiplication and addition, okay. Can you tell me what going from A to E in two steps means?" },
+                { role: "person", text: "Sure, as far as I understand it, the chain starts in A, makes one jump, then another jump, and ends in E." },
+                { role: "ai", text: "Can you give me an example? What's the probability of going A → E → E?" },
+                { role: "person", text: "It is 0.12." },
+                { role: "ai", text: "How did you get to that number?" },
+                { role: "person", text: "The first jump from A to E is 0.4, then staying in E is 0.3. Both have to happen, so 0.4*0.3 = 0.12." },
+                { role: "ai", text: "Interesting. Earlier you said it had something to do with multiplication and addition. Where does the addition show up in your calculation?" },
+                { role: "person", text: "Hmm. Not yet. But there is a second way: stay in A first and then jump to E. That is 0.6*0.4 = 0.24. If I add both ways I get 0.12 + 0.24 = 0.36." },
+                { role: "ai", text: "What would that give you for going from E to E in two steps?" },
+                { role: "person", text: "E → E → E is 0.3*0.3 = 0.09. But from E to A I get E → E → A = 0.3*0.7 = 0.21, and 0.09 + 0.21 is only 0.30." },
+                { role: "ai", text: "What do you make of the results?" },
+                { role: "person", text: "0.30 can't be it, after two steps the chain has to be somewhere, so it should add up to 1. I forgot the paths through A. E → A → E is 0.7*0.4 = 0.28, so E to E is 0.09 + 0.28 = 0.37. E → A → A is 0.7*0.6 = 0.42, so E to A is 0.21 + 0.42 = 0.63. Together 1. That fits." },
+                { role: "ai", text: "And for a chain with three states?" },
+                { role: "person", text: "Then there are three possible states in between, so I add three products." },
+                { role: "ai", text: "So how would you describe the formula?" },
+                { role: "person", text: "For every state k in between, multiply p_ik*p_kj, then add them all: p_ij(2) = Σ p_ik*p_kj." },
+                { role: "ai", text: "Coming back to my first question: Explain to me how to calculate the probability of going from A to E in two steps?" },
+                { role: "person", text: "You take every state the chain can be in after the first step, multiply the two probabilities along that path and add the paths: 0.4*0.3 + 0.6*0.4 = 0.36." }
+            ],
+            "stubborn": [
+                { role: "ai", text: "Explain to me how to calculate the probability of going from A to E in two steps." },
+                { role: "person", text: "To calculate the two-step probability, take the one-step probability and square it." },
+                { role: "ai", text: "Explain with an example, why square?" },
+                { role: "person", text: "It is two steps, so I use the same probability twice." },
+                { role: "ai", text: "Can you provide me an example with the E/A chain please?" },
+                { role: "person", text: "From A to E is 0.4, 0.4*0.4 = 0.16, the two-step probability is 0.16." },
+                { role: "ai", text: "I am trying to follow the chain step by step. Where is the chain after the first jump of your example? And from which state does the second jump start?" },
+                { role: "person", text: "In E. But it is still squaring, I just add 0.2 on top." },
+                { role: "ai", text: "Can you please try your rule for E to E and for E to A in two steps?" },
+                { role: "person", text: "E to E is 0.3*0.3 = 0.09 and E to A is 0.7*0.7 = 0.49." },
+                { role: "ai", text: "After two steps the chain has to be either in E or in A. What do your two numbers add up to?" },
+                { role: "person", text: "0.58. That should be 1. So I add 0.42 on top." },
+                { role: "ai", text: "Where would the 0.42 come from in the graph? Hint: write down every way to get from E to A in two jumps, one arrow after the other." },
+                { role: "person", text: "E → E → A and E → A → A. Then E to A is 1 - (0.3*0.3 + 0.7*0.4)." },
+                { role: "ai", text: "That is one way to get there. Can you also get it directly from the two ways you just wrote down? Hint: what is the probability of each way, and how do you combine two ways that cannot happen together?" },
+                { role: "person", text: "0.3*0.7 + 0.7*0.6 = 0.63" },
+                { role: "ai", text: "How would you say that rule in your own words for a chain with 2 states? Can you please make it for 3 states?" }
+            ]
+        };
+
+        const objectives = [
+            { id: 1, title: "Transition Graphs & Matrices", desc: "Set up the transition graph and matrix correctly." },
+            { id: 2, title: "The Markov Property", desc: "Describe the core Markov property concept." },
+            { id: 3, title: "N-Step Distribution", desc: "Calculate distribution after n steps using the initial vector." },
+            { id: 4, title: "N-Step Probabilities", desc: "Calculate specific n-step transition probabilities." }
+        ];
+
+        // --- COMPONENTS ---
+
+        function App() {
+            const [view, setView] = useState('intro'); // 'intro', 'material', 'chat'
+
+            return (
+                <div className="min-h-screen bg-gray-100 font-sans">
+                    {view === 'intro' && <IntroScreen onStart={() => setView('material')} />}
+                    {view === 'material' && <MaterialScreen onFinish={() => setView('chat')} />}
+                    {view === 'chat' && <ChatScreen onReset={() => setView('intro')} />}
+                </div>
+            );
+        }
+
+        function IntroScreen({ onStart }) {
+            return (
+                <div className="flex items-center justify-center min-h-screen p-6 fade-in">
+                    <div className="max-w-2xl bg-white p-10 rounded-2xl shadow-xl text-center">
+                        <h1 className="text-4xl font-bold text-blue-900 mb-6">Welcome to the Learning Phase</h1>
+                        <p className="text-xl text-gray-700 mb-8 leading-relaxed">
+                            Please read the following material carefully. You will be asked to explain these concepts to your AI peer, Sam, afterwards. 
+                            <br/><br/>
+                            Take your time to understand the concepts before proceeding.
+                        </p>
+                        <button 
+                            onClick={onStart}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-10 rounded-full text-lg transition shadow-lg hover:shadow-xl"
+                        >
+                            Start Learning
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        function MaterialScreen({ onFinish }) {
+            return (
+                <div className="max-w-4xl mx-auto py-10 px-6 fade-in">
+                    <div className="flex justify-between items-center mb-8">
+                        <h1 className="text-3xl font-bold text-gray-800">Learning Material</h1>
+                        <button onClick={onFinish} className="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-lg transition shadow">
+                            Learning Finished
+                        </button>
+                    </div>
+
+                    <div className="bg-white rounded-xl shadow-sm p-8 prose max-w-none text-gray-800 leading-relaxed mb-8">
+                        <h2 className="text-2xl font-bold text-blue-900 mb-4">10.1: Introduction to Markov Chains</h2>
+                        <p className="mb-4">
+                            In this chapter, we consider a type of stochastic process (a sequence of random variables) known as a Markov Chain. A Markov chain is a mathematical system that experiences transitions from one state to another according to certain probabilistic rules.
+                        </p>
+                        <p className="mb-4 font-semibold text-blue-800 bg-blue-50 p-4 rounded border border-blue-100">
+                            The defining characteristic of a Markov chain is that no matter how the process arrived at its present state, the possible future states are fixed. In other words, the probability of transitioning to any particular state is dependent solely on the current state and time elapsed. (The Markov Property)
+                        </p>
+
+                        <h3 className="text-xl font-bold mt-8 mb-3">Example: The E/A Chain</h3>
+                        <p className="mb-4">
+                            Let's look at a simple chain with two states: <strong>E</strong> and <strong>A</strong>. 
+                            The probabilities of moving between these states in one step are as follows:
+                        </p>
+                        <ul className="list-disc pl-6 mb-6">
+                            <li>From <strong>E</strong> to <strong>E</strong>: 0.3</li>
+                            <li>From <strong>E</strong> to <strong>A</strong>: 0.7</li>
+                            <li>From <strong>A</strong> to <strong>E</strong>: 0.4</li>
+                            <li>From <strong>A</strong> to <strong>A</strong>: 0.6</li>
+                        </ul>
+
+                        <h3 className="text-xl font-bold mt-8 mb-3">Transition Matrix</h3>
+                        <p className="mb-4">
+                            We can represent these probabilities in a Transition Matrix <em>P</em>, where the rows represent the current state and columns represent the next state. Note that each row must sum to 1.
+                        </p>
+                        <div className="bg-gray-50 p-4 rounded border font-mono text-center text-lg mb-8">
+                            P = <br/>
+                            [ 0.3 &nbsp; 0.7 ] <br/>
+                            [ 0.4 &nbsp; 0.6 ]
+                        </div>
+                        
+                        <p className="mb-4">
+                            If you want to calculate the probability of being in a specific state after multiple steps, you have to account for all possible paths that could lead to that state. This involves matrix multiplication (squaring the matrix for 2 steps).
+                        </p>
+                    </div>
+
+                    <div className="flex justify-center">
+                        <button onClick={onFinish} className="bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-12 rounded-full text-lg transition shadow-lg">
+                            Learning Finished (Proceed to Chat)
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        function ChatScreen({ onReset }) {
+            const [scenario, setScenario] = useState("empty");
+            const messages = scenarios[scenario];
+            const chatEndRef = useRef(null);
+
+            // Determine progress based on scenario
+            let progress = 0;
+            if (scenario === "correct") progress = 100;
+            else if (scenario === "wrong") progress = 75;
+            else if (scenario === "no_knowledge") progress = 50;
+            else if (scenario === "stubborn") progress = 25;
+
+            useEffect(() => {
+                chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, [scenario]);
+
+            return (
+                <div className="h-screen flex flex-col md:flex-row overflow-hidden fade-in">
+                    
+                    {/* LEFT PANEL: Learning Objectives */}
+                    <div className="w-full md:w-1/3 bg-white border-r border-gray-200 flex flex-col p-6 overflow-y-auto hidden md:flex">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-bold text-gray-800">Learning Progress</h2>
+                            <span className="text-sm font-bold text-blue-600 bg-blue-100 px-3 py-1 rounded-full">{progress}%</span>
+                        </div>
+                        
+                        <div className="w-full bg-gray-200 rounded-full h-2.5 mb-8">
+                            <div className="bg-blue-600 h-2.5 rounded-full transition-all duration-500" style={{ width: `${progress}%` }}></div>
+                        </div>
+
+                        <div className="space-y-4">
+                            {objectives.map((obj, i) => {
+                                // Simulate completion based on progress percentage
+                                const isCompleted = (progress / 100) >= ((i + 1) / objectives.length);
+                                return (
+                                    <div key={obj.id} className={`p-4 rounded-xl border ${isCompleted ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-100'}`}>
+                                        <div className="flex items-start">
+                                            <div className="mt-0.5 mr-3">
+                                                {isCompleted ? 
+                                                    <span className="text-green-500 text-lg">✅</span> : 
+                                                    <span className="text-gray-300 text-lg">⬜</span>
+                                                }
+                                            </div>
+                                            <div>
+                                                <h3 className={`font-semibold ${isCompleted ? 'text-green-800' : 'text-gray-600'}`}>{obj.title}</h3>
+                                                <p className="text-xs text-gray-500 mt-1">{obj.desc}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+
+                    {/* RIGHT PANEL: Chat */}
+                    <div className="w-full md:w-2/3 flex flex-col bg-gray-50 h-full">
+                        {/* Chat Header */}
+                        <div className="bg-white border-b px-6 py-4 flex justify-between items-center shadow-sm z-10">
+                            <div className="flex items-center">
+                                <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-xl mr-3">🤖</div>
+                                <div>
+                                    <h2 className="font-bold text-gray-800">Sam (AI Peer)</h2>
+                                    <p className="text-xs text-gray-500">Waiting for you to teach...</p>
+                                </div>
+                            </div>
+                            
+                            <div className="flex gap-2">
+                                {/* PROTOTYPE CONTROLS */}
+                                <select 
+                                    className="text-sm border rounded bg-gray-50 p-2 text-gray-700 outline-none focus:ring-2 focus:ring-blue-500"
+                                    value={scenario}
+                                    onChange={(e) => setScenario(e.target.value)}
+                                >
+                                    <option value="empty">Start (Empty)</option>
+                                    <option value="wrong">Ex 1: Wrong Explanation</option>
+                                    <option value="correct">Ex 2: Correct Explanation</option>
+                                    <option value="no_knowledge">Ex 3: No Knowledge</option>
+                                    <option value="stubborn">Ex 4: Doesn't Learn</option>
+                                </select>
+                                <button onClick={onReset} className="text-sm bg-red-100 hover:bg-red-200 text-red-700 px-3 py-2 rounded transition">
+                                    Reset App
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Chat Messages */}
+                        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                            {messages.map((msg, idx) => (
+                                <div key={idx} className={`flex ${msg.role === 'ai' ? 'justify-start' : 'justify-end'}`}>
+                                    <div className={`max-w-[80%] rounded-2xl p-4 shadow-sm ${msg.role === 'ai' ? 'bg-white border text-gray-800' : 'bg-blue-600 text-white'}`}>
+                                        <p className="whitespace-pre-wrap">{msg.text}</p>
+                                    </div>
+                                </div>
+                            ))}
+                            <div ref={chatEndRef} />
+                        </div>
+
+                        {/* Input Area (Mocked for prototype) */}
+                        <div className="p-4 bg-white border-t">
+                            <div className="flex bg-gray-100 rounded-full p-1 border">
+                                <input 
+                                    type="text" 
+                                    placeholder="Type your explanation here... (Disabled in prototype view)" 
+                                    className="flex-1 bg-transparent px-4 py-2 outline-none text-gray-600"
+                                    disabled
+                                />
+                                <button disabled className="bg-blue-600 text-white px-6 py-2 rounded-full font-semibold opacity-50 cursor-not-allowed">
+                                    Send
+                                </button>
+                            </div>
+                            <p className="text-center text-xs text-gray-400 mt-2">Simulation Mode. Select examples from the top right dropdown.</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
