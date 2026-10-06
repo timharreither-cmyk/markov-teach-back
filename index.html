@@ -285,7 +285,10 @@
                         {/* Chat Messages */}
                         <div className="flex-1 overflow-y-auto p-6 space-y-6">
                             {messages.map((msg, idx) => (
-                                <div key={idx} className={`flex ${msg.role === 'ai' ? 'justify-start' : 'justify-end'}`}>
+                                <div key={idx} className={`flex flex-col ${msg.role === 'ai' ? 'items-start' : 'items-end'}`}>
+                                    <span className="text-xs font-semibold text-gray-500 mb-1 px-1">
+                                        {msg.role === 'ai' ? 'AI Affordance (Sam)' : 'Student'}
+                                    </span>
                                     <div className={`max-w-[80%] rounded-2xl p-4 shadow-sm ${msg.role === 'ai' ? 'bg-white border text-gray-800' : 'bg-blue-600 text-white'}`}>
                                         <p className="whitespace-pre-wrap">{msg.text}</p>
                                     </div>
