@@ -214,39 +214,26 @@
                         </button>
                     </div>
 
-                    <div className="bg-white rounded-xl shadow-sm p-8 prose max-w-none text-gray-800 leading-relaxed mb-8">
-                        <h2 className="text-2xl font-bold text-blue-900 mb-4">10.1: Introduction to Markov Chains</h2>
-                        <p className="mb-4">
-                            In this chapter, we consider a type of stochastic process (a sequence of random variables) known as a Markov Chain. A Markov chain is a mathematical system that experiences transitions from one state to another according to certain probabilistic rules.
-                        </p>
-                        <p className="mb-4 font-semibold text-blue-800 bg-blue-50 p-4 rounded border border-blue-100">
-                            The defining characteristic of a Markov chain is that no matter how the process arrived at its present state, the possible future states are fixed. In other words, the probability of transitioning to any particular state is dependent solely on the current state and time elapsed. (The Markov Property)
-                        </p>
-
-                        <h3 className="text-xl font-bold mt-8 mb-3">Example: The E/A Chain</h3>
-                        <p className="mb-4">
-                            Let's look at a simple chain with two states: <strong>E</strong> and <strong>A</strong>. 
-                            The probabilities of moving between these states in one step are as follows:
-                        </p>
-                        <ul className="list-disc pl-6 mb-6">
-                            <li>From <strong>E</strong> to <strong>E</strong>: 0.3</li>
-                            <li>From <strong>E</strong> to <strong>A</strong>: 0.7</li>
-                            <li>From <strong>A</strong> to <strong>E</strong>: 0.4</li>
-                            <li>From <strong>A</strong> to <strong>A</strong>: 0.6</li>
-                        </ul>
-
-                        <h3 className="text-xl font-bold mt-8 mb-3">Transition Matrix</h3>
-                        <p className="mb-4">
-                            We can represent these probabilities in a Transition Matrix <em>P</em>, where the rows represent the current state and columns represent the next state. Note that each row must sum to 1.
-                        </p>
-                        <div className="bg-gray-50 p-4 rounded border font-mono text-center text-lg mb-8">
-                            P = <br/>
-                            [ 0.3 &nbsp; 0.7 ] <br/>
-                            [ 0.4 &nbsp; 0.6 ]
-                        </div>
-                        
-                        <p className="mb-4">
-                            If you want to calculate the probability of being in a specific state after multiple steps, you have to account for all possible paths that could lead to that state. This involves matrix multiplication (squaring the matrix for 2 steps).
+                    {/* The material is the LibreTexts section, shown unchanged as page images (material/page-1.png ... page-7.png). */}
+                    <div className="bg-white rounded-xl shadow-sm p-4 sm:p-8 mb-8">
+                        {[1, 2, 3, 4, 5, 6, 7].map((n) => (
+                            <img
+                                key={n}
+                                src={`material/page-${n}.png`}
+                                alt={`10.1: Introduction to Markov Chains, page ${n} of 7`}
+                                className="block w-full h-auto"
+                            />
+                        ))}
+                        <p className="text-xs text-gray-500 mt-6 pt-4 border-t">
+                            Source:{" "}
+                            <a className="text-blue-600 underline" target="_blank" rel="noopener noreferrer"
+                               href="https://math.libretexts.org/Bookshelves/Applied_Mathematics/Applied_Finite_Mathematics_(Sekhon_and_Bloom)/10%3A_Markov_Chains/10.01%3A_Introduction_to_Markov_Chains">
+                                10.1: Introduction to Markov Chains
+                            </a>{" "}
+                            by Rupinder Sekhon and Roberta Bloom, LibreTexts, shared under a{" "}
+                            <a className="text-blue-600 underline" target="_blank" rel="noopener noreferrer"
+                               href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>{" "}
+                            license. Content unchanged; page header and footer removed.
                         </p>
                     </div>
 
