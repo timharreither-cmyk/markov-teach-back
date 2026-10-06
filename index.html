@@ -109,6 +109,68 @@
 
         // --- COMPONENTS ---
 
+        // Transition graph of the E/A chain with all four one-step probabilities.
+        function ChainGraph({ className }) {
+            return (
+                <svg viewBox="0 0 420 160" className={className} role="img"
+                     aria-label="Transition graph of the E/A chain: E to E 0.3, E to A 0.7, A to E 0.4, A to A 0.6">
+                    <defs>
+                        <marker id="arrowEA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+                            <path d="M0 0 L10 5 L0 10 z" fill="#2563eb" />
+                        </marker>
+                    </defs>
+                    <g fill="none" stroke="#2563eb" strokeWidth="2">
+                        <path markerEnd="url(#arrowEA)" d="M 101 62 C 50 30, 50 130, 101 98" />
+                        <path markerEnd="url(#arrowEA)" d="M 143 66 Q 210 30 277 66" />
+                        <path markerEnd="url(#arrowEA)" d="M 277 94 Q 210 130 143 94" />
+                        <path markerEnd="url(#arrowEA)" d="M 319 98 C 370 130, 370 30, 319 62" />
+                    </g>
+                    <g fill="#ffffff" stroke="#1f2937" strokeWidth="2">
+                        <circle cx="120" cy="80" r="26" />
+                        <circle cx="300" cy="80" r="26" />
+                    </g>
+                    <g fill="#1f2937" fontSize="18" fontWeight="700" textAnchor="middle">
+                        <text x="120" y="86">E</text>
+                        <text x="300" y="86">A</text>
+                    </g>
+                    <g fill="#1f2937" fontSize="17" fontWeight="600">
+                        <text x="52" y="85" textAnchor="end">0.3</text>
+                        <text x="210" y="36" textAnchor="middle">0.7</text>
+                        <text x="210" y="136" textAnchor="middle">0.4</text>
+                        <text x="368" y="85">0.6</text>
+                    </g>
+                </svg>
+            );
+        }
+
+        // Reference strip above the chat: the example every conversation is about.
+        function ChainReference() {
+            const cell = "border border-gray-200 bg-white px-3 py-1 text-center font-mono";
+            const head = "px-3 py-1 text-xs font-semibold text-gray-500";
+            return (
+                <div className="bg-white border-b px-6 py-3 flex flex-col sm:flex-row items-center gap-x-8 gap-y-3">
+                    <ChainGraph className="w-64 sm:w-80 shrink-0" />
+                    <div className="text-sm text-gray-700">
+                        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Example in this chat: the E/A chain</p>
+                        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                            <table className="border-collapse">
+                                <thead>
+                                    <tr><th></th><th className={head}>to E</th><th className={head}>to A</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><th className={head + " text-right"}>from E</th><td className={cell}>0.3</td><td className={cell}>0.7</td></tr>
+                                    <tr><th className={head + " text-right"}>from A</th><td className={cell}>0.4</td><td className={cell}>0.6</td></tr>
+                                </tbody>
+                            </table>
+                            <p className="hidden sm:block text-xs text-gray-500 max-w-[16rem]">
+                                Each arrow shows the probability of that jump in one step. The arrows leaving a state add up to 1.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
         function App() {
             const [view, setView] = useState('intro'); // 'intro', 'material', 'chat'
 
@@ -281,6 +343,9 @@
                                 </button>
                             </div>
                         </div>
+
+                        {/* The example the conversation refers to */}
+                        <ChainReference />
 
                         {/* Chat Messages */}
                         <div className="flex-1 overflow-y-auto p-6 space-y-6">
