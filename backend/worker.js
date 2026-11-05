@@ -88,8 +88,11 @@ async function workersAI(env, system, messages, schema, temperature) {
     temperature,
     max_tokens: 1500
   };
-  // JSON mode first; if the model does not support it (or cannot meet it), retry as plain text.
-  const tries = schema ? [{ ...input, response_format: { type: "json_schema", json_schema: schema } }, input] : [input];
+  // Thinking off first (much faster, Sam's replies are short), then JSON mode;
+  // each variant falls back to the next if the model rejects it or returns no JSON.
+  const fast = { ...input, chat_template_kwargs: { enable_thinking: false } };
+  const json = (x) => ({ ...x, response_format: { type: "json_schema", json_schema: schema } });
+  const tries = schema ? [json(fast), fast, json(input), input] : [fast, input];
   let last = "";
   for (const req of tries) {
     for (let attempt = 0; attempt < 2; attempt++) {
