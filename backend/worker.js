@@ -17,6 +17,8 @@
 //   LOG_TOKEN        (secret)  same random string as TOKEN in Code.gs
 //   ALLOWED_ORIGINS  (text)    e.g. https://timharreither-cmyk.github.io
 //   MODEL            (text, optional) Workers AI default: @cf/google/gemma-4-26b-a4b-it
+//   THINKING         (text, optional) "on" (default) = model thinks before answering
+//                    (better judgement, ~5-15 s); "off" = no thinking (~3 s)
 //   MAX_CALLS_PER_SESSION (text, optional) default 80
 //   GEMINI_API_KEY   (secret, optional) only if you use Gemini instead
 // =====================================================================
@@ -86,13 +88,14 @@ async function workersAI(env, system, messages, schema, temperature) {
       ...messages.map((m) => ({ role: m.role === "model" ? "assistant" : "user", content: m.text }))
     ],
     temperature,
-    max_tokens: 1500
+    max_tokens: 4000                 // room for thinking, so the answer is not cut off
   };
-  // Thinking off first (much faster, Sam's replies are short), then JSON mode;
-  // each variant falls back to the next if the model rejects it or returns no JSON.
-  const fast = { ...input, chat_template_kwargs: { enable_thinking: false } };
+  // THINKING=off → no thinking (fast). Otherwise thinking on (default).
+  // Each variant falls back to the next if the model rejects it or returns no JSON.
+  const thinkingOn = String(env.THINKING || "on").toLowerCase() !== "off";
+  const think = { ...input, chat_template_kwargs: { enable_thinking: thinkingOn } };
   const json = (x) => ({ ...x, response_format: { type: "json_schema", json_schema: schema } });
-  const tries = schema ? [json(fast), fast, json(input), input] : [fast, input];
+  const tries = schema ? [json(think), think, json(input), input] : [think, input];
   let last = "";
   for (const req of tries) {
     for (let attempt = 0; attempt < 2; attempt++) {
