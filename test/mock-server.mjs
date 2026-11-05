@@ -29,21 +29,22 @@ const counters = { teach: {}, error: 0 };
 
 function fakeReply(payload) {
   const sys = payload.systemInstruction.parts[0].text;
-  const exhausted = /hint budget is USED UP/.test(sys);
   if (/end-of-session feedback/.test(sys)) {
     return { strengths: ["You explained the graph step by step.", "You used Miso consistently."], weaknesses: ["You first squared each entry of T."], focus: ["T² is the matrix product T·T: entry (i,j) adds up all two-step paths i→k→j."] };
   }
-  if (/THE TWO MISTAKES/.test(sys)) {
+  if (/CURRENT STATEMENT/.test(sys)) {
+    const stmt = (sys.match(/CURRENT STATEMENT \(what you, Sam, just said\):\n(.*)/) || [])[1] || "";
     counters.error++;
-    if (counters.error === 1) return { verdict_given: "false", found_mistakes: ["e1"], misconceptions: [], move: "hint", message: "Nice, you fixed the train row! Is there anything else? Does my answer add up to 1?" };
-    return { verdict_given: "false", found_mistakes: ["e1", "e2"], misconceptions: [], move: "recap", message: "So T² must be T·T, not squared entries. Correct answer: [0.376 0.356 0.268]. Thanks!" };
+    if (stmt.includes("from Playing") && !/Hints already given for this statement: 1/.test(sys))
+      return { verdict_given: "false", corrected: false, misconceptions: [], move: "hint", message: "Hmm, can you add up the arrows leaving P for me?" };
+    return { verdict_given: "false", corrected: true, misconceptions: [], move: "recap", message: "Right, thanks! Now I see my mistake." };
   }
   const topic = (sys.match(/CURRENT TOPIC: (.*)/) || [])[1];
   counters.teach[topic] = (counters.teach[topic] || 0) + 1;
   const n = counters.teach[topic];
-  if (topic.startsWith("Transition probability graph")) {
+  if (topic.startsWith("Transition graph")) {
     // always "hint": the app must force a reveal once the budget is used up
-    return { assessment: "incorrect", covered_items: ["g1"], misconceptions: ["arrows only between different states"], move: exhausted ? "hint" : "hint", message: `Hint ${n}: what about Miso staying asleep?` };
+    return { assessment: "incorrect", covered_items: ["g1"], misconceptions: ["arrows only between different states"], move: "hint", message: `Hint ${n}: what about Miso staying asleep?` };
   }
   if (topic.startsWith("Transition matrix")) {
     if (n === 1) return { assessment: "partially_correct", covered_items: ["m1", "m2"], misconceptions: [], move: "probe", message: "Why does each row add up to 1?" };

@@ -1,10 +1,15 @@
 // =====================================================================
 // app.jsx: study flow for "Learning by Teaching: Markov Chains".
-// Flow (documentation section 6):
-//   AI group:      consent → intro → material → T1 → T2 → T3 → error → feedback → done
-//   Control group: consent → intro → material → 3 aloud prompts → error example → summary → done
-// The flow and the hint rules live HERE, not in the model. The model only
-// assesses each message and writes Sam's reply (see content.js).
+//
+//   Both groups: consent → intro → material (max 10 min)
+//     → steps 1-3 with the Miso example (max 15 min)
+//     → step 4: check wrong statements (max 10 min)
+//   AI group:      steps 1-4 are chats with Sam, then a feedback report + summary
+//   Control group: steps 1-3 written alone (textbook hint button),
+//                  step 4 as cards with hint button and solution, then the summary
+//
+// The flow, the time limits and the hint rules live HERE, not in the model.
+// The model only assesses each message and writes Sam's reply (content.js).
 // =====================================================================
 
 const { useState, useEffect, useRef, useCallback } = React;
@@ -13,6 +18,23 @@ const params = new URLSearchParams(location.search);
 const WORKER = (params.get("api") || window.CONFIG.WORKER_URL).replace(/\/$/, "");
 const now = () => Date.now();
 const uid = () => Math.random().toString(36).slice(2, 10) + now().toString(36);
+const NS = C.statements.length;
+
+// Time limits per phase (seconds); the same for both groups.
+const LIMIT = {
+  material: C.timing.material * 60,
+  teach: C.timing.example * 60, c_teach: C.timing.example * 60,
+  error: C.timing.error * 60, c_error: C.timing.error * 60
+};
+const NEXT_ON_TIMEOUT = { material: null, teach: "error", c_teach: "c_error", error: "feedback", c_error: "summary" };
+const TIMEOUT_NOTICE = {
+  material: "The time for the material is up. Let's start teaching.",
+  teach: "The time for the example is up. Let's continue with the next part.",
+  c_teach: "The time for the example is up. Let's continue with the next part.",
+  error: "The time for checking the statements is up.",
+  c_error: "The time for checking the statements is up."
+};
+const stmtText = (i) => `${i + 1}/${NS}: ${C.statements[i].text} Is that right?`;
 
 // ------------------------------------------------------------------
 // Persistence: one state object per participant in localStorage, so a
@@ -28,16 +50,27 @@ function saveState(s) {
 function freshState(pid, group, code) {
   return {
     v: C.version, pid, group, code, sid: uid(), startedAt: now(),
-    phase: "consent", phaseStarts: { consent: now() },
+    phase: "consent", phaseStarts: { consent: now() }, notice: null,
     topicIdx: 0,
     topics: C.topics.map((t) => ({
       id: t.id, covered: [], hints: 0, turns: 0, outcome: null, start: null, end: null,
       misconceptions: [], messages: [{ role: "sam", text: t.opener }]
     })),
-    err: { found: [], hints: 0, turns: 0, outcome: null, verdict: "none", start: null, end: null,
-           misconceptions: [], messages: [{ role: "sam", text: C.errorTask.opener }] },
+    err: {
+      idx: 0, done: false,
+      messages: [{ role: "sam", text: C.statementsIntro }, { role: "sam", text: stmtText(0), stmt: 0 }],
+      items: C.statements.map((st, i) => ({
+        id: st.id, hints: 0, turns: 0, outcome: null, verdict: "none", corrected: false,
+        start: null, end: null, misconceptions: [], msgStart: i === 0 ? 1 : null
+      }))
+    },
+    ctl: {
+      idx: 0,
+      items: C.topics.map((t) => ({ id: t.id, text: "", hints: 0, start: null, end: null, outcome: null })),
+      eidx: 0,
+      eitems: C.statements.map((st) => ({ id: st.id, text: "", hints: 0, submitted: false, start: null, end: null, outcome: null }))
+    },
     feedback: null,
-    control: { idx: 0, times: C.control.prompts.map(() => ({ start: null, end: null })) },
     counters: { tabHidden: 0, pasteBlocked: 0, apiErrors: 0 }
   };
 }
@@ -63,8 +96,7 @@ async function flushLog() {
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify({ code: batch[0].code, events: batch.map(({ code, ...e }) => e) })
     });
-    if (r.ok) sent = true;
-    if (r.ok) setQueue(queue().slice(batch.length));
+    if (r.ok) { sent = true; setQueue(queue().slice(batch.length)); }
   } catch (e) { /* retried on the next event or by the 15 s timer */ }
   flushing = false;
   if (sent && queue().length) flushLog();   // events queued while we were sending
@@ -83,32 +115,41 @@ function makeLogger(s) {
 }
 
 // Session summary: one row per participant in the "sessions" sheet.
+// Hint counts use the same column names in both groups (Sam's hints vs.
+// textbook hints), so the two conditions can be compared directly.
 function buildSummary(s) {
   const sec = (a, b) => (a && b ? Math.round((b - a) / 1000) : "");
+  const ai = s.group === "ai";
+  const P = s.phaseStarts;
   const row = {
     pid: s.pid, group: s.group, sid: s.sid, version: s.v,
     started: new Date(s.startedAt).toISOString(),
     phase_now: s.phase,
-    material_sec: sec(s.phaseStarts.material, s.phaseStarts[s.group === "ai" ? "teach" : "c_teach"]),
+    material_sec: sec(P.material, P[ai ? "teach" : "c_teach"]),
+    example_sec: sec(P[ai ? "teach" : "c_teach"], P[ai ? "error" : "c_error"]),
+    error_sec: sec(P[ai ? "error" : "c_error"], P[ai ? "feedback" : "summary"]),
     tab_hidden: s.counters.tabHidden, paste_blocked: s.counters.pasteBlocked, api_errors: s.counters.apiErrors
   };
-  if (s.group === "ai") {
-    s.topics.forEach((t) => {
-      row[`${t.id}_hints`] = t.hints;
-      row[`${t.id}_turns`] = t.turns;
-      row[`${t.id}_outcome`] = t.outcome || "";
-      row[`${t.id}_covered`] = t.covered.join(" ");
-      row[`${t.id}_sec`] = sec(t.start, t.end);
-    });
-    row.ERR_hints = s.err.hints; row.ERR_turns = s.err.turns; row.ERR_outcome = s.err.outcome || "";
-    row.ERR_found = s.err.found.join(" "); row.ERR_sec = sec(s.err.start, s.err.end);
-    row.total_hints = s.topics.reduce((a, t) => a + t.hints, 0) + s.err.hints;
-  } else {
-    s.control.times.forEach((t, i) => { row[`C${i + 1}_sec`] = sec(t.start, t.end); });
-    row.ERR_read_sec = sec(s.phaseStarts.c_error, s.phaseStarts.summary);
-  }
-  row.finished = s.phase === "done" ? new Date(s.phaseStarts.done).toISOString() : "";
-  row.total_min = s.phaseStarts.done ? Math.round((s.phaseStarts.done - s.startedAt) / 600) / 100 : "";
+  let total = 0;
+  C.topics.forEach((t, i) => {
+    const p = ai ? s.topics[i] : s.ctl.items[i];
+    row[`${t.id}_hints`] = p.hints; total += p.hints;
+    row[`${t.id}_outcome`] = p.outcome || "";
+    row[`${t.id}_sec`] = sec(p.start, p.end);
+    if (ai) { row[`${t.id}_turns`] = p.turns; row[`${t.id}_covered`] = p.covered.join(" "); }
+    else row[`${t.id}_chars`] = p.text.trim().length;
+  });
+  C.statements.forEach((st, i) => {
+    const p = ai ? s.err.items[i] : s.ctl.eitems[i];
+    row[`${st.id}_hints`] = p.hints; total += p.hints;
+    row[`${st.id}_outcome`] = p.outcome || "";
+    row[`${st.id}_sec`] = sec(p.start, p.end);
+    if (ai) { row[`${st.id}_turns`] = p.turns; row[`${st.id}_verdict`] = p.verdict; }
+    else row[`${st.id}_chars`] = p.text.trim().length;
+  });
+  row.total_hints = total;
+  row.finished = s.phase === "done" ? new Date(P.done).toISOString() : "";
+  row.total_min = P.done ? Math.round((P.done - s.startedAt) / 600) / 100 : "";
   return row;
 }
 
@@ -119,7 +160,7 @@ function fill(tpl, vars) {
   return tpl.replace(/\{\{(\w+)\}\}/g, (_, k) => (vars[k] !== undefined ? String(vars[k]) : ""));
 }
 async function callModel(s, system, history, schema, temperature = 0.4) {
-  // Gemini expects the conversation to start with a user turn.
+  // The conversation must start with a user turn.
   const messages = [{ role: "user", text: "(The session starts. Sam speaks first.)" }]
     .concat(history.map((m) => ({ role: m.role === "sam" ? "model" : "user", text: m.text })));
   const t0 = now();
@@ -132,6 +173,7 @@ async function callModel(s, system, history, schema, temperature = 0.4) {
   if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return { data: j.data, latency: now() - t0, model: j.model };
 }
+const MOVES = ["probe", "hint", "recap", "reveal"];
 
 // ==================================================================
 // UI building blocks
@@ -143,6 +185,7 @@ function Btn({ children, onClick, disabled, kind = "primary", className = "" }) 
   const k = {
     primary: "bg-indigo-600 hover:bg-indigo-700 text-white",
     green: "bg-emerald-600 hover:bg-emerald-700 text-white",
+    amber: "bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300",
     ghost: "bg-slate-100 hover:bg-slate-200 text-slate-700"
   }[kind];
   return (
@@ -158,24 +201,14 @@ function Page({ children, wide }) {
 function Pre({ children, mono }) {
   return <div className={`whitespace-pre-wrap text-sm leading-relaxed text-slate-700 ${mono ? "font-mono text-[13px]" : ""}`}>{children}</div>;
 }
-function ProblemCard({ title, text, extra, extraTitle }) {
+function ProblemCard({ title, text }) {
   const [open, setOpen] = useState(true);
   return (
     <div className="bg-amber-50 border-b border-amber-200 px-4 sm:px-6 py-3">
       <button onClick={() => setOpen(!open)} className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-amber-800">
         <span>{open ? "▾" : "▸"}</span>{title}
       </button>
-      {open && (
-        <div className="mt-2 max-h-[38vh] overflow-y-auto pr-2">
-          <Pre>{text}</Pre>
-          {extra && (
-            <div className="mt-3 bg-white/70 border border-amber-200 rounded-lg p-3">
-              <p className="text-xs font-bold text-amber-800 mb-1">{extraTitle}</p>
-              <Pre mono>{extra}</Pre>
-            </div>
-          )}
-        </div>
-      )}
+      {open && <div className="mt-2 max-h-[34vh] overflow-y-auto pr-2"><Pre>{text}</Pre></div>}
     </div>
   );
 }
@@ -194,9 +227,43 @@ function Summary() {
     </Card>
   );
 }
+function secondsLeft(s) {
+  const lim = LIMIT[s.phase];
+  if (!lim || !s.phaseStarts[s.phase]) return null;
+  return Math.max(0, Math.ceil((s.phaseStarts[s.phase] + lim * 1000 - now()) / 1000));
+}
+function TimeLeft({ s, label = "Time left" }) {
+  const left = secondsLeft(s);
+  if (left === null) return null;
+  const mm = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  return (
+    <span className={`inline-flex items-center gap-1.5 text-sm font-semibold tabular-nums px-3 py-1.5 rounded-full ${left <= 60 ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}`}>
+      ⏱ <span className="hidden sm:inline font-normal">{label}</span> {mm}
+    </span>
+  );
+}
+function Notice({ s, update }) {
+  if (!s.notice) return null;
+  return (
+    <div className="bg-amber-100 border-b border-amber-300 text-amber-900 text-sm px-4 py-2 flex items-center justify-between gap-3">
+      <span>{s.notice}</span>
+      <button className="font-bold" onClick={() => update((d) => { d.notice = null; })}>✕</button>
+    </div>
+  );
+}
+function NoPasteArea({ value, onChange, onPasteBlocked, rows = 6, placeholder, disabled, onKeyDown, className = "" }) {
+  return (
+    <textarea
+      value={value} rows={rows} disabled={disabled} placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)} onKeyDown={onKeyDown}
+      onPaste={(e) => { e.preventDefault(); onPasteBlocked(); }} onDrop={(e) => e.preventDefault()}
+      className={`w-full resize-none rounded-xl border border-slate-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-400 disabled:bg-slate-100 ${className}`}
+    />
+  );
+}
 
 // ==================================================================
-// Screens
+// Screens shared by both groups
 // ==================================================================
 function ConsentScreen({ s, go, log }) {
   const [ok, setOk] = useState(false);
@@ -206,7 +273,7 @@ function ConsentScreen({ s, go, log }) {
       <Card className="p-8">
         <h1 className="text-2xl font-bold text-slate-800 mb-4">Welcome</h1>
         <div className="space-y-3 text-slate-700 leading-relaxed">
-          <p>This study is part of a course project on <b>learning by teaching</b> (Digital Education, CS-411). It takes about 30 to 60 minutes.</p>
+          <p>This study is part of a course project on <b>learning by teaching</b> (Digital Education, CS-411). The learning part takes at most 35 minutes.</p>
           <p>Your participant ID is <b className="font-mono">{s.pid}</b>. We store your answers and the time you spend on each part under this ID only; no name or e-mail is collected in this app.</p>
           {s.group === "ai" && (
             <p>You will chat with an AI peer. Your messages are sent to an AI language model (run on Cloudflare Workers AI) to generate the replies. Please do not type personal information into the chat.</p>
@@ -232,6 +299,7 @@ function ConsentScreen({ s, go, log }) {
 
 function IntroScreen({ s, go }) {
   const ai = s.group === "ai";
+  const T = C.timing;
   return (
     <Page>
       <Card className="p-8">
@@ -239,9 +307,18 @@ function IntroScreen({ s, go }) {
         <div className="space-y-3 text-slate-700 leading-relaxed">
           <p>You will first study a short text on <b>Markov chains</b>. Study it with one goal in mind: <b>afterwards you will have to teach it</b>.</p>
           <p>{ai
-            ? <>You will explain it to <b>Sam</b>, a fellow student who missed the lecture. Sam will ask questions and try things out on an example.</>
-            : <>You will explain it out loud, as if to a fellow student who missed the lecture, while your camera records.</>}</p>
-          <p className="p-3 bg-amber-50 border border-amber-200 rounded-lg"><b>Important:</b> once you press "I'm ready to teach", the material is closed and you <b>cannot open it again</b>. Please do not use other websites, notes or AI tools during the study. Paper and pen for calculations are fine.</p>
+            ? <>You will explain it to <b>Sam</b>, a fellow student who missed the lecture, using an example. Then Sam will tell you what Sam understood, and you check whether it is right.</>
+            : <>You will explain it in writing, as if to a fellow student who missed the lecture, using an example. Then you will check some statements about it.</>}</p>
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm">
+            <p className="font-semibold mb-1">Time limits</p>
+            <ul className="list-disc pl-5 space-y-0.5">
+              <li>Material: up to {T.material} minutes</li>
+              <li>Teaching with the example (3 steps): up to {T.example} minutes</li>
+              <li>Checking statements: up to {T.error} minutes</li>
+            </ul>
+            <p className="mt-1 text-slate-500">When a time limit is reached, the study moves on automatically.</p>
+          </div>
+          <p className="p-3 bg-amber-50 border border-amber-200 rounded-lg"><b>Important:</b> once you press "I'm ready to teach" (or the time is up), the material is closed and you <b>cannot open it again</b>. Please do not use other websites, notes or AI tools during the study. Paper and pen for calculations are fine.</p>
         </div>
         <div className="mt-6"><Btn onClick={() => go("material")}>Open the material</Btn></div>
       </Card>
@@ -254,9 +331,12 @@ function MaterialScreen({ s, go }) {
   const next = s.group === "ai" ? "teach" : "c_teach";
   return (
     <div className="max-w-4xl mx-auto py-8 px-4 fade-in">
-      <div className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur py-3 mb-4 flex justify-between items-center gap-4">
+      <div className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur py-3 mb-4 flex flex-wrap justify-between items-center gap-3">
         <h1 className="text-xl sm:text-2xl font-bold text-slate-800">Learning material</h1>
-        <Btn kind="green" onClick={() => setConfirm(true)}>I'm ready to teach</Btn>
+        <div className="flex items-center gap-3">
+          <TimeLeft s={s} />
+          <Btn kind="green" onClick={() => setConfirm(true)}>I'm ready to teach</Btn>
+        </div>
       </div>
       <Card className="p-3 sm:p-6">
         {[1, 2, 3, 4, 5, 6, 7].map((n) => (
@@ -282,13 +362,14 @@ function MaterialScreen({ s, go }) {
   );
 }
 
-// ------------------------------------------------------------------
-// Chat (AI group): used for Topics 1-3 and for the error task
-// ------------------------------------------------------------------
+// ==================================================================
+// AI group: chat with Sam (steps 1-3 and step 4)
+// ==================================================================
 function Steps({ s }) {
+  const errDone = s.err.items.filter((x) => x.outcome).length;
   const items = [
     ...C.topics.map((t, i) => ({ label: t.title, done: !!s.topics[i].outcome, active: s.phase === "teach" && s.topicIdx === i })),
-    { label: "Check Sam's solution", done: !!s.err.outcome, active: s.phase === "error" },
+    { label: `Check Sam's statements (${errDone}/${NS})`, done: s.err.done || ["feedback", "done"].includes(s.phase), active: s.phase === "error" },
     { label: "Feedback", done: s.phase === "done", active: s.phase === "feedback" }
   ];
   return (
@@ -303,119 +384,9 @@ function Steps({ s }) {
   );
 }
 
-function ChatScreen({ s, update, log, go }) {
-  const isErr = s.phase === "error";
-  const part = isErr ? s.err : s.topics[s.topicIdx];
-  const topic = isErr ? null : C.topics[s.topicIdx];
-  const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [toast, setToast] = useState(null);
+function ChatLayout({ s, update, subtitle, badge, messages, busy, error, toast, input, setInput, onSend, footerDone }) {
   const endRef = useRef(null);
-  const finished = !!part.outcome;
-
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" }); }, [part.messages.length, busy]);
-  useEffect(() => {
-    if (!part.start) {
-      update((d) => { const p = isErr ? d.err : d.topics[d.topicIdx]; p.start = now(); });
-      log("part_start", { part: isErr ? "ERR" : topic.id });
-    }
-  }, [s.phase, s.topicIdx]);
-
-  const R = C.rules;
-  async function send() {
-    const msg = text.trim();
-    if (!msg || busy || finished) return;
-    setText(""); setError(null); setBusy(true);
-    const partId = isErr ? "ERR" : topic.id;
-    const history = [...part.messages, { role: "student", text: msg }];
-    const turns = part.turns + 1;
-    const exhausted = part.hints >= R.hintBudget || turns >= R.maxTurnsPerPart;
-    const budgetRule = exhausted
-      ? "The hint budget is USED UP. If anything is still missing or wrong after this message, your move MUST be REVEAL (no more hints). If everything is covered now, use RECAP."
-      : "REVEAL is NOT allowed yet. Use PROBE, HINT, or RECAP (if everything is covered).";
-    update((d) => { const p = isErr ? d.err : d.topics[d.topicIdx]; p.messages.push({ role: "student", text: msg, ts: now() }); });
-    log("message", { part: partId, role: "student", text: msg, turn: turns });
-
-    let system, schema;
-    if (isErr) {
-      system = fill(C.prompts.error, {
-        problem: C.errorTask.problem, faulty: C.errorTask.faultySolution,
-        mistakes: C.errorTask.mistakes.map((m) => `${m.id}: ${m.text}`).join("\n"),
-        correct: C.errorTask.correctSolution,
-        found: part.found.length ? part.found.join(", ") : "none",
-        hints: part.hints, budgetRule
-      });
-      schema = C.schemas.error;
-    } else {
-      system = fill(C.prompts.teach, {
-        topicTitle: topic.title, topicTask: topic.task,
-        rubric: topic.rubric.map((r) => `${r.id}: ${r.text}`).join("\n"),
-        reference: topic.reference, problem: C.catProblem.text, solution: C.catProblem.solution,
-        covered: part.covered.length ? part.covered.join(", ") : "none",
-        hints: part.hints, budgetRule
-      });
-      schema = C.schemas.teach;
-    }
-
-    try {
-      const { data, latency, model } = await callModel(s, system, history, schema);
-      let move = ["probe", "hint", "recap", "reveal"].includes(data.move) ? data.move : "probe";
-      let reply = String(data.message || "").trim() || "Hmm, could you say that again in other words?";
-      let flag = "";
-      // Code-side enforcement of the hint budget (documentation 6.1).
-      if (exhausted && move === "hint") {
-        move = "reveal"; flag = "forced_reveal";
-        reply += "\n\nOkay, I think I need to look at it differently. " + (isErr ? C.errorTask.correctSolution : topic.reference);
-      }
-      if (!exhausted && move === "reveal") flag = "early_reveal";
-      const validIds = isErr ? C.errorTask.mistakes.map((m) => m.id) : topic.rubric.map((r) => r.id);
-      const claimed = ((isErr ? data.found_mistakes : data.covered_items) || []).filter((x) => validIds.includes(x));
-      const done = move === "recap" || move === "reveal";
-
-      update((d) => {
-        const p = isErr ? d.err : d.topics[d.topicIdx];
-        p.turns = turns;
-        if (move === "hint") p.hints += 1;
-        const key = isErr ? "found" : "covered";
-        p[key] = Array.from(new Set([...p[key], ...claimed])).sort();
-        p.misconceptions.push(...(data.misconceptions || []));
-        if (isErr && data.verdict_given && data.verdict_given !== "none") p.verdict = data.verdict_given;
-        p.messages.push({ role: "sam", text: reply, move, ts: now() });
-        if (done) { p.outcome = move; p.end = now(); }
-      });
-      log("message", {
-        part: partId, role: "sam", text: reply, turn: turns, move,
-        assessment: data.assessment || data.verdict_given || "",
-        hint_count: part.hints + (move === "hint" ? 1 : 0),
-        covered: claimed.join(" "), misconceptions: (data.misconceptions || []).join(" | "),
-        latency_ms: latency, model, flag
-      });
-      if (done) log("part_end", { part: partId, outcome: move });
-    } catch (e) {
-      // Roll back the student's message so the turn can be retried.
-      update((d) => { const p = isErr ? d.err : d.topics[d.topicIdx]; p.messages.pop(); d.counters.apiErrors += 1; });
-      setText(msg);
-      setError("Sam couldn't answer (connection problem). Please press Send again.");
-      log("api_error", { part: partId, error: String(e.message || e) });
-    }
-    setBusy(false);
-  }
-
-  function next() {
-    if (isErr) go("feedback");
-    else if (s.topicIdx < C.topics.length - 1) update((d) => { d.topicIdx += 1; });
-    else go("error");
-  }
-
-  function onPaste(e) {
-    e.preventDefault();
-    update((d) => { d.counters.pasteBlocked += 1; });
-    log("paste_blocked", { part: isErr ? "ERR" : topic.id });
-    setToast("Pasting is disabled. Please explain in your own words.");
-    setTimeout(() => setToast(null), 3000);
-  }
-
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" }); }, [messages.length, busy]);
   return (
     <div className="h-[100dvh] flex flex-col md:flex-row overflow-hidden fade-in">
       <aside className="hidden md:flex md:w-72 lg:w-80 shrink-0 flex-col bg-white border-r border-slate-200 p-5 gap-5 overflow-y-auto">
@@ -429,24 +400,24 @@ function ChatScreen({ s, update, log, go }) {
       </aside>
 
       <main className="flex-1 flex flex-col min-h-0 min-w-0 bg-slate-50">
+        <Notice s={s} update={update} />
         <header className="bg-white border-b border-slate-200 px-4 sm:px-6 py-3 flex items-center gap-3">
-          <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-xl">🧑‍🎓</div>
-          <div className="min-w-0">
+          <div className="w-10 h-10 shrink-0 bg-indigo-100 rounded-full flex items-center justify-center text-xl">🧑‍🎓</div>
+          <div className="min-w-0 flex-1">
             <h2 className="font-bold text-slate-800 leading-tight">Sam <span className="font-normal text-slate-500 text-sm">· your AI peer</span></h2>
-            <p className="text-xs text-slate-500 truncate">{isErr ? "Check Sam's solution: true or false? Fix the mistakes." : `Part ${s.topicIdx + 1} of 3: ${topic.task}`}</p>
+            <p className="text-xs text-slate-500 truncate">{subtitle}</p>
           </div>
-          <span className="ml-auto md:hidden text-xs font-semibold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full">{isErr ? "4/5" : `${s.topicIdx + 1}/5`}</span>
+          <span className="md:hidden text-xs font-semibold text-indigo-700 bg-indigo-50 px-2 py-1 rounded-full">{badge}</span>
+          <TimeLeft s={s} />
         </header>
 
-        {isErr
-          ? <ProblemCard title={C.errorTask.title} text={C.errorTask.problem} extra={C.errorTask.faultySolution} extraTitle="Sam's solution" />
-          : <ProblemCard title={C.catProblem.title} text={C.catProblem.text} />}
+        <ProblemCard title={C.catProblem.title} text={C.catProblem.text} />
 
         <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-4">
-          {part.messages.map((m, i) => (
+          {messages.map((m, i) => (
             <div key={i} className={`flex flex-col ${m.role === "sam" ? "items-start" : "items-end"}`}>
               <span className="text-[11px] font-semibold text-slate-400 mb-1 px-1">{m.role === "sam" ? "Sam" : "You"}</span>
-              <div className={`max-w-[85%] sm:max-w-[75%] rounded-2xl px-4 py-3 shadow-sm whitespace-pre-wrap leading-relaxed ${m.role === "sam" ? "bg-white border border-slate-200 text-slate-800" : "bg-indigo-600 text-white"}`}>{m.text}</div>
+              <div className={`max-w-[85%] sm:max-w-[75%] rounded-2xl px-4 py-3 shadow-sm whitespace-pre-wrap leading-relaxed ${m.role === "sam" ? (m.stmt !== undefined ? "bg-amber-50 border border-amber-300 text-slate-800" : "bg-white border border-slate-200 text-slate-800") : "bg-indigo-600 text-white"}`}>{m.text}</div>
             </div>
           ))}
           {busy && <div className="text-sm text-slate-400 px-1 animate-pulse">Sam is thinking…</div>}
@@ -456,22 +427,16 @@ function ChatScreen({ s, update, log, go }) {
         <footer className="bg-white border-t border-slate-200 p-3 sm:p-4">
           {error && <p className="text-sm text-rose-600 mb-2">{error}</p>}
           {toast && <p className="text-sm text-amber-700 mb-2">{toast}</p>}
-          {finished ? (
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-sm text-slate-600">{isErr ? "Done with Sam's solution." : "This part is done."}</p>
-              <Btn kind="green" onClick={next}>{isErr ? "See your feedback" : s.topicIdx < C.topics.length - 1 ? "Next part" : "Continue"}</Btn>
-            </div>
-          ) : (
+          {footerDone ? footerDone : (
             <div className="flex gap-2 items-end">
-              <textarea
-                value={text} rows={2} disabled={busy}
-                onChange={(e) => setText(e.target.value)}
-                onPaste={onPaste} onDrop={(e) => e.preventDefault()}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              <NoPasteArea
+                value={input} rows={2} disabled={busy} onChange={setInput}
+                onPasteBlocked={() => input !== null && onSend.pasteBlocked()}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); } }}
                 placeholder="Explain to Sam… (Enter to send, Shift+Enter for a new line)"
-                className="flex-1 resize-none rounded-xl border border-slate-300 px-4 py-3 outline-none focus:ring-2 focus:ring-indigo-400 disabled:bg-slate-100"
+                className="flex-1"
               />
-              <Btn onClick={send} disabled={busy || !text.trim()} className="py-3">Send</Btn>
+              <Btn onClick={onSend} disabled={busy || !input.trim()} className="py-3">Send</Btn>
             </div>
           )}
         </footer>
@@ -480,23 +445,227 @@ function ChatScreen({ s, update, log, go }) {
   );
 }
 
-// ------------------------------------------------------------------
-// Feedback (AI group, documentation 6.1.3)
-// ------------------------------------------------------------------
+function useChatHelpers(update, log, partId) {
+  const [toast, setToast] = useState(null);
+  const pasteBlocked = () => {
+    update((d) => { d.counters.pasteBlocked += 1; });
+    log("paste_blocked", { part: partId });
+    setToast("Pasting is disabled. Please explain in your own words.");
+    setTimeout(() => setToast(null), 3000);
+  };
+  return { toast, pasteBlocked };
+}
+
+function budgetRuleFor(hints, turns) {
+  const exhausted = hints >= C.rules.hintBudget || turns >= C.rules.maxTurnsPerPart;
+  return {
+    exhausted,
+    text: exhausted
+      ? "The hint budget is USED UP. If anything is still missing or wrong after this message, your move MUST be REVEAL (no more hints). If everything is covered now, use RECAP."
+      : "REVEAL is NOT allowed yet. Use PROBE, HINT, or RECAP (if everything is covered)."
+  };
+}
+
+// Steps 1-3: teaching the example
+function TeachChat({ s, sRef, update, log, go }) {
+  const part = s.topics[s.topicIdx];
+  const topic = C.topics[s.topicIdx];
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const { toast, pasteBlocked } = useChatHelpers(update, log, topic.id);
+
+  useEffect(() => {
+    if (!part.start) {
+      update((d) => { d.topics[d.topicIdx].start = now(); });
+      log("part_start", { part: topic.id });
+    }
+  }, [s.topicIdx]);
+
+  async function send() {
+    const msg = text.trim();
+    if (!msg || busy || part.outcome) return;
+    setText(""); setError(null); setBusy(true);
+    const idx = s.topicIdx;
+    const history = [...part.messages, { role: "student", text: msg }];
+    const turns = part.turns + 1;
+    const budget = budgetRuleFor(part.hints, turns);
+    update((d) => { d.topics[idx].messages.push({ role: "student", text: msg, ts: now() }); });
+    log("message", { part: topic.id, role: "student", text: msg, turn: turns });
+
+    const system = fill(C.prompts.teach, {
+      topicTitle: topic.title, topicTask: topic.task,
+      rubric: topic.rubric.map((r) => `${r.id}: ${r.text}`).join("\n"),
+      reference: topic.reference, problem: C.catProblem.text, solution: C.catProblem.solution,
+      covered: part.covered.length ? part.covered.join(", ") : "none",
+      hints: part.hints, budgetRule: budget.text
+    });
+    try {
+      const { data, latency, model } = await callModel(s, system, history, C.schemas.teach);
+      if (sRef.current.phase !== "teach" || sRef.current.topicIdx !== idx) return; // time ran out meanwhile
+      let move = MOVES.includes(data.move) ? data.move : "probe";
+      let reply = String(data.message || "").trim() || "Hmm, could you say that again in other words?";
+      let flag = "";
+      if (budget.exhausted && move === "hint") {             // enforce the hint budget
+        move = "reveal"; flag = "forced_reveal";
+        reply += "\n\nOkay, I think I get it differently now. " + topic.reference;
+      }
+      if (!budget.exhausted && move === "reveal") flag = "early_reveal";
+      const ids = topic.rubric.map((r) => r.id);
+      const claimed = (data.covered_items || []).filter((x) => ids.includes(x));
+      const done = move === "recap" || move === "reveal";
+      update((d) => {
+        const p = d.topics[idx];
+        p.turns = turns;
+        if (move === "hint") p.hints += 1;
+        p.covered = Array.from(new Set([...p.covered, ...claimed])).sort();
+        p.misconceptions.push(...(data.misconceptions || []));
+        p.messages.push({ role: "sam", text: reply, move, ts: now() });
+        if (done) { p.outcome = move; p.end = now(); }
+      });
+      log("message", {
+        part: topic.id, role: "sam", text: reply, turn: turns, move,
+        assessment: data.assessment || "", hint_count: part.hints + (move === "hint" ? 1 : 0),
+        covered: claimed.join(" "), misconceptions: (data.misconceptions || []).join(" | "),
+        latency_ms: latency, model, flag
+      });
+      if (done) log("part_end", { part: topic.id, outcome: move });
+    } catch (e) {
+      update((d) => { d.topics[idx].messages.pop(); d.counters.apiErrors += 1; });
+      setText(msg);
+      setError("Sam couldn't answer (connection problem). Please press Send again.");
+      log("api_error", { part: topic.id, error: String(e.message || e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+  send.pasteBlocked = pasteBlocked;
+
+  const last = s.topicIdx === C.topics.length - 1;
+  const footerDone = part.outcome && (
+    <div className="flex items-center justify-between gap-3">
+      <p className="text-sm text-slate-600">{last ? "All three steps are done." : "This step is done."}</p>
+      <Btn kind="green" onClick={() => last ? go("error") : update((d) => { d.topicIdx += 1; })}>
+        {last ? "Example done → check Sam's statements" : "Next step"}
+      </Btn>
+    </div>
+  );
+  return (
+    <ChatLayout s={s} update={update} subtitle={`Step ${s.topicIdx + 1} of 3: ${topic.task}`} badge={`${s.topicIdx + 1}/4`}
+      messages={part.messages} busy={busy} error={error} toast={toast}
+      input={text} setInput={setText} onSend={send} footerDone={footerDone} />
+  );
+}
+
+// Step 4: Sam's wrong statements, one after another in one chat
+function StatementChat({ s, sRef, update, log, go }) {
+  const E = s.err;
+  const i = E.idx;
+  const item = E.items[i];
+  const st = C.statements[i];
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const { toast, pasteBlocked } = useChatHelpers(update, log, st.id);
+
+  useEffect(() => {
+    if (!item.start) {
+      update((d) => { d.err.items[d.err.idx].start = now(); });
+      log("part_start", { part: st.id });
+    }
+  }, [i]);
+
+  async function send() {
+    const msg = text.trim();
+    if (!msg || busy || E.done) return;
+    setText(""); setError(null); setBusy(true);
+    const history = [...E.messages.slice(item.msgStart), { role: "student", text: msg }];
+    const turns = item.turns + 1;
+    const budget = budgetRuleFor(item.hints, turns);
+    update((d) => { d.err.messages.push({ role: "student", text: msg, ts: now() }); });
+    log("message", { part: st.id, role: "student", text: msg, turn: turns });
+
+    const system = fill(C.prompts.statement, {
+      problem: C.catProblem.text, solution: C.catProblem.solution,
+      statement: st.text, mistake: st.mistake, correction: st.correction,
+      hints: item.hints, budgetRule: budget.text
+    });
+    try {
+      const { data, latency, model } = await callModel(s, system, history, C.schemas.statement);
+      if (sRef.current.phase !== "error" || sRef.current.err.idx !== i) return;
+      let move = MOVES.includes(data.move) ? data.move : "probe";
+      let reply = String(data.message || "").trim() || "Hmm, can you explain that a bit more?";
+      let flag = "";
+      if (budget.exhausted && move === "hint") {
+        move = "reveal"; flag = "forced_reveal";
+        reply += "\n\nWait, I think I see it now: " + st.mistake;
+      }
+      if (!budget.exhausted && move === "reveal") flag = "early_reveal";
+      const done = move === "recap" || move === "reveal";
+      update((d) => {
+        const p = d.err.items[i];
+        p.turns = turns;
+        if (move === "hint") p.hints += 1;
+        if (data.verdict_given && data.verdict_given !== "none") p.verdict = data.verdict_given;
+        if (data.corrected) p.corrected = true;
+        p.misconceptions.push(...(data.misconceptions || []));
+        d.err.messages.push({ role: "sam", text: reply, move, ts: now() });
+        if (done) {
+          p.outcome = move; p.end = now();
+          if (i < NS - 1) {
+            d.err.messages.push({ role: "sam", text: stmtText(i + 1), stmt: i + 1, ts: now() });
+            d.err.idx = i + 1;
+            d.err.items[i + 1].msgStart = d.err.messages.length - 1;
+            d.err.items[i + 1].start = now();
+          } else d.err.done = true;
+        }
+      });
+      log("message", {
+        part: st.id, role: "sam", text: reply, turn: turns, move,
+        assessment: data.verdict_given || "", hint_count: item.hints + (move === "hint" ? 1 : 0),
+        covered: data.corrected ? "corrected" : "", misconceptions: (data.misconceptions || []).join(" | "),
+        latency_ms: latency, model, flag
+      });
+      if (done) log("part_end", { part: st.id, outcome: move });
+    } catch (e) {
+      update((d) => { d.err.messages.pop(); d.counters.apiErrors += 1; });
+      setText(msg);
+      setError("Sam couldn't answer (connection problem). Please press Send again.");
+      log("api_error", { part: st.id, error: String(e.message || e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+  send.pasteBlocked = pasteBlocked;
+
+  const footerDone = E.done && (
+    <div className="flex items-center justify-between gap-3">
+      <p className="text-sm text-slate-600">You checked all of Sam's statements.</p>
+      <Btn kind="green" onClick={() => go("feedback")}>See your feedback</Btn>
+    </div>
+  );
+  return (
+    <ChatLayout s={s} update={update} subtitle={`Step 4: Is Sam right? Statement ${Math.min(i + 1, NS)} of ${NS}. If it's wrong, correct it.`} badge="4/4"
+      messages={E.messages} busy={busy} error={error} toast={toast}
+      input={text} setInput={setText} onSend={send} footerDone={footerDone} />
+  );
+}
+
+// Step 5 (AI group): feedback report and summary
 function FeedbackScreen({ s, update, log, go }) {
   const [state, setState] = useState(s.feedback ? "ok" : "loading");
   const tried = useRef(false);
 
   const load = useCallback(async () => {
     setState("loading");
-    const parts = [
-      ...s.topics.map((t, i) => ({ name: `${t.id} ${C.topics[i].title}`, p: t })),
-      { name: "ERR Checking Sam's faulty solution", p: s.err }
-    ];
-    const stats = parts.map(({ name, p }) => `${name}: hints=${p.hints}, messages=${p.turns}, outcome=${p.outcome || "unfinished"}`).join("\n");
-    const transcripts = parts.map(({ name, p }) =>
-      `### ${name}\n` + p.messages.map((m) => `${m.role === "sam" ? "Sam" : "Student"}: ${m.text}`).join("\n")
-    ).join("\n\n").slice(-24000);
+    const stats = [
+      ...C.topics.map((t, i) => { const p = s.topics[i]; return `${t.id} ${t.title}: hints=${p.hints}, messages=${p.turns}, outcome=${p.outcome || "unfinished"}`; }),
+      ...C.statements.map((st, i) => { const p = s.err.items[i]; return `${st.id} statement on ${st.category}: hints=${p.hints}, messages=${p.turns}, outcome=${p.outcome || "unfinished"}`; })
+    ].join("\n");
+    const transcripts = [
+      ...C.topics.map((t, i) => `### ${t.id} ${t.title}\n` + s.topics[i].messages.map((m) => `${m.role === "sam" ? "Sam" : "Student"}: ${m.text}`).join("\n")),
+      "### Step 4: checking Sam's wrong statements\n" + s.err.messages.map((m) => `${m.role === "sam" ? "Sam" : "Student"}: ${m.text}`).join("\n")
+    ].join("\n\n").slice(-24000);
     try {
       const { data, latency } = await callModel(s, fill(C.prompts.feedback, { stats, transcripts }),
         [{ role: "student", text: "Please write my feedback report." }], C.schemas.feedback, 0.3);
@@ -518,110 +687,202 @@ function FeedbackScreen({ s, update, log, go }) {
   useEffect(() => { if (!s.feedback && !tried.current) { tried.current = true; load(); } }, []);
   const fb = s.feedback;
   return (
-    <Page wide>
-      <h1 className="text-2xl sm:text-3xl font-bold text-slate-800 mb-6">Your feedback</h1>
-      {state === "loading" && <Card className="p-8 text-slate-500 animate-pulse">Writing your feedback report…</Card>}
-      {state === "error" && (
-        <Card className="p-6">
-          <p className="text-slate-700 mb-4">The feedback report could not be generated. Please try again; if it keeps failing, continue to the summary.</p>
-          <div className="flex gap-3"><Btn onClick={load}>Try again</Btn><Btn kind="ghost" onClick={() => setState("skip")}>Continue without report</Btn></div>
-        </Card>
-      )}
-      {state === "ok" && fb && (
-        <div className="grid md:grid-cols-2 gap-4 mb-6">
+    <>
+      <Notice s={s} update={update} />
+      <Page wide>
+        <h1 className="text-2xl sm:text-3xl font-bold text-slate-800 mb-6">Your feedback</h1>
+        {state === "loading" && <Card className="p-8 text-slate-500 animate-pulse">Writing your feedback report…</Card>}
+        {state === "error" && (
           <Card className="p-6">
-            <h2 className="font-bold text-emerald-700 mb-3">What went well</h2>
-            <ul className="space-y-3 text-slate-700 leading-relaxed list-disc pl-5">{fb.strengths.map((x, i) => <li key={i}>{x}</li>)}</ul>
+            <p className="text-slate-700 mb-4">The feedback report could not be generated. Please try again; if it keeps failing, continue to the summary.</p>
+            <div className="flex gap-3"><Btn onClick={load}>Try again</Btn><Btn kind="ghost" onClick={() => setState("skip")}>Continue without report</Btn></div>
           </Card>
-          <Card className="p-6">
-            <h2 className="font-bold text-amber-700 mb-3">What to work on</h2>
-            <ul className="space-y-3 text-slate-700 leading-relaxed list-disc pl-5">{fb.weaknesses.map((x, i) => <li key={i}>{x}</li>)}</ul>
-          </Card>
-          {fb.focus.length > 0 && (
-            <Card className="p-6 md:col-span-2 bg-indigo-50/50">
-              <h2 className="font-bold text-indigo-800 mb-3">A closer look at what was tricky for you</h2>
-              <div className="space-y-3 text-slate-700 leading-relaxed">{fb.focus.map((x, i) => <p key={i}>{x}</p>)}</div>
+        )}
+        {state === "ok" && fb && (
+          <div className="grid md:grid-cols-2 gap-4 mb-6">
+            <Card className="p-6">
+              <h2 className="font-bold text-emerald-700 mb-3">What went well</h2>
+              <ul className="space-y-3 text-slate-700 leading-relaxed list-disc pl-5">{fb.strengths.map((x, i) => <li key={i}>{x}</li>)}</ul>
             </Card>
-          )}
-        </div>
-      )}
-      {(state === "ok" || state === "skip") && (
-        <>
-          <Summary />
-          <div className="mt-6 flex justify-end"><Btn kind="green" onClick={() => go("done")}>Finish</Btn></div>
-        </>
-      )}
-    </Page>
+            <Card className="p-6">
+              <h2 className="font-bold text-amber-700 mb-3">What to work on</h2>
+              <ul className="space-y-3 text-slate-700 leading-relaxed list-disc pl-5">{fb.weaknesses.map((x, i) => <li key={i}>{x}</li>)}</ul>
+            </Card>
+            {fb.focus.length > 0 && (
+              <Card className="p-6 md:col-span-2 bg-indigo-50/50">
+                <h2 className="font-bold text-indigo-800 mb-3">A closer look at what was tricky for you</h2>
+                <div className="space-y-3 text-slate-700 leading-relaxed">{fb.focus.map((x, i) => <p key={i}>{x}</p>)}</div>
+              </Card>
+            )}
+          </div>
+        )}
+        {(state === "ok" || state === "skip") && (
+          <>
+            <Summary />
+            <div className="mt-6 flex justify-end"><Btn kind="green" onClick={() => go("done")}>Finish</Btn></div>
+          </>
+        )}
+      </Page>
+    </>
   );
 }
 
-// ------------------------------------------------------------------
-// Control group (documentation 6.2)
-// ------------------------------------------------------------------
-function ControlTeachScreen({ s, update, log, go }) {
-  const i = s.control.idx;
-  const t = s.control.times[i];
-  const [tick, setTick] = useState(0);
-  useEffect(() => { const h = setInterval(() => setTick((x) => x + 1), 1000); return () => clearInterval(h); }, []);
-  const elapsed = t.start ? Math.floor((now() - t.start) / 1000) : 0;
-  const min = C.control.minSecondsPerPrompt;
-  const mmss = (x) => `${Math.floor(x / 60)}:${String(x % 60).padStart(2, "0")}`;
+// ==================================================================
+// Control group (no AI): written explanations with textbook hints
+// ==================================================================
+function HintBox({ hints, used, onMore, label = "Show a hint" }) {
+  return (
+    <div className="mt-3">
+      {used > 0 && (
+        <ol className="space-y-2 mb-3">
+          {hints.slice(0, used).map((h, k) => (
+            <li key={k} className="text-sm bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-slate-700"><b className="text-amber-800">Hint {k + 1}:</b> {h}</li>
+          ))}
+        </ol>
+      )}
+      <Btn kind="amber" onClick={onMore} disabled={used >= hints.length} className="py-2 px-4 text-sm">
+        {used >= hints.length ? "No more hints" : `${label} (${used}/${hints.length} used)`}
+      </Btn>
+    </div>
+  );
+}
 
-  function start() {
-    update((d) => { d.control.times[i].start = now(); });
-    log("control_prompt_start", { part: `C${i + 1}` });
+function ControlTeachScreen({ s, update, log, go }) {
+  const i = s.ctl.idx;
+  const item = s.ctl.items[i];
+  const topic = C.topics[i];
+  const [toast, setToast] = useState(null);
+  const last = i === C.topics.length - 1;
+  const enough = item.text.trim().length >= C.control.minChars;
+
+  useEffect(() => {
+    if (!item.start) { update((d) => { d.ctl.items[d.ctl.idx].start = now(); }); log("part_start", { part: topic.id }); }
+  }, [i]);
+
+  function hint() {
+    update((d) => { d.ctl.items[i].hints += 1; });
+    log("hint_shown", { part: topic.id, hint_count: item.hints + 1 });
   }
   function done() {
-    update((d) => { d.control.times[i].end = now(); });
-    log("control_prompt_end", { part: `C${i + 1}`, seconds: elapsed });
-    if (i < C.control.prompts.length - 1) update((d) => { d.control.idx += 1; });
-    else go("c_error");
+    update((d) => {
+      const p = d.ctl.items[i]; p.end = now(); p.outcome = "done";
+      if (!last) d.ctl.idx += 1;
+    });
+    log("control_answer", { part: topic.id, text: item.text, hint_count: item.hints, extra: JSON.stringify({ chars: item.text.trim().length }) });
+    if (last) go("c_error");
+    window.scrollTo(0, 0);
   }
-  return (
-    <Page wide>
-      <p className="text-sm font-semibold text-indigo-700 mb-2">Part {i + 1} of {C.control.prompts.length}</p>
-      {i === 0 && !t.start && <Card className="p-5 mb-4 bg-indigo-50/60 text-slate-700 leading-relaxed">{C.control.intro}</Card>}
-      <Card className="p-6 sm:p-8 mb-4">
-        <h1 className="text-xl sm:text-2xl font-bold text-slate-800 leading-snug">{C.control.prompts[i]}</h1>
-      </Card>
-      <Card className="mb-6 overflow-hidden"><ProblemCard title={C.catProblem.title} text={C.catProblem.text} /></Card>
-      <div className="flex items-center justify-between gap-4">
-        <div className="text-3xl font-mono text-slate-700 tabular-nums">{mmss(elapsed)}</div>
-        {!t.start
-          ? <Btn onClick={start}>Start explaining</Btn>
-          : <Btn kind="green" disabled={elapsed < min} onClick={done}>{elapsed < min ? `Keep explaining (${min - elapsed}s)` : "I'm done with this part"}</Btn>}
-      </div>
-    </Page>
-  );
-}
+  function pasteBlocked() {
+    update((d) => { d.counters.pasteBlocked += 1; });
+    log("paste_blocked", { part: topic.id });
+    setToast("Pasting is disabled. Please explain in your own words.");
+    setTimeout(() => setToast(null), 3000);
+  }
 
-function ControlErrorScreen({ s, go }) {
-  const E = C.errorTask;
   return (
-    <Page wide>
-      <h1 className="text-2xl font-bold text-slate-800 mb-2">Worked example with mistakes</h1>
-      <p className="text-slate-600 mb-6">{C.control.errorIntro}</p>
-      <div className="space-y-4">
-        <Card className="p-6"><h2 className="font-bold text-slate-800 mb-2">Problem</h2><Pre>{E.problem}</Pre></Card>
-        <Card className="p-6"><h2 className="font-bold text-slate-800 mb-2">A student's (faulty) solution</h2><Pre mono>{E.faultySolution}</Pre></Card>
-        <Card className="p-6 bg-rose-50/50">
-          <h2 className="font-bold text-rose-800 mb-2">The two mistakes</h2>
-          <ol className="list-decimal pl-5 space-y-2 text-slate-700">{E.mistakes.map((m) => <li key={m.id}>{m.text}</li>)}</ol>
+    <>
+      <Notice s={s} update={update} />
+      <Page wide>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <p className="text-sm font-semibold text-indigo-700">Step {i + 1} of 3: {topic.title}</p>
+          <TimeLeft s={s} label="Time left for the example" />
+        </div>
+        {i === 0 && !item.text && <Card className="p-5 mb-4 bg-indigo-50/60 text-slate-700 leading-relaxed">{C.control.intro}</Card>}
+        <Card className="mb-4 overflow-hidden"><ProblemCard title={C.catProblem.title} text={C.catProblem.text} /></Card>
+        <Card className="p-6">
+          <h1 className="text-lg sm:text-xl font-bold text-slate-800 leading-snug mb-4">{topic.task}</h1>
+          <NoPasteArea value={item.text} rows={8} onPasteBlocked={pasteBlocked}
+            onChange={(v) => update((d) => { d.ctl.items[i].text = v; })}
+            placeholder="Write your explanation here, in your own words…" />
+          {toast && <p className="text-sm text-amber-700 mt-2">{toast}</p>}
+          <HintBox hints={topic.textbookHints} used={item.hints} onMore={hint} />
+          <div className="flex flex-wrap items-center justify-between gap-3 mt-6 pt-4 border-t">
+            <p className="text-xs text-slate-500">{enough ? "" : `Please write at least ${C.control.minChars} characters.`}</p>
+            <Btn kind="green" disabled={!enough} onClick={done}>{last ? "Answers done: example done" : "Answers done: next step"}</Btn>
+          </div>
         </Card>
-        <Card className="p-6 bg-emerald-50/50"><h2 className="font-bold text-emerald-800 mb-2">Correct solution</h2><Pre mono>{E.correctSolution}</Pre></Card>
-      </div>
-      <div className="mt-6 flex justify-end"><Btn kind="green" onClick={() => go("summary")}>Continue</Btn></div>
-    </Page>
+      </Page>
+    </>
   );
 }
 
-function SummaryScreen({ go }) {
+function ControlErrorScreen({ s, update, log, go }) {
+  const i = s.ctl.eidx;
+  const item = s.ctl.eitems[i];
+  const st = C.statements[i];
+  const [toast, setToast] = useState(null);
+  const last = i === NS - 1;
+
+  useEffect(() => {
+    if (!item.start) { update((d) => { d.ctl.eitems[d.ctl.eidx].start = now(); }); log("part_start", { part: st.id }); }
+  }, [i]);
+
+  function hint() {
+    update((d) => { d.ctl.eitems[i].hints += 1; });
+    log("hint_shown", { part: st.id, hint_count: item.hints + 1 });
+  }
+  function submit() {
+    update((d) => { d.ctl.eitems[i].submitted = true; d.ctl.eitems[i].outcome = "submitted"; });
+    log("control_answer", { part: st.id, text: item.text, hint_count: item.hints, extra: JSON.stringify({ chars: item.text.trim().length }) });
+  }
+  function next() {
+    update((d) => { d.ctl.eitems[i].end = now(); if (!last) d.ctl.eidx += 1; });
+    if (last) go("summary");
+    window.scrollTo(0, 0);
+  }
+  function pasteBlocked() {
+    update((d) => { d.counters.pasteBlocked += 1; });
+    log("paste_blocked", { part: st.id });
+    setToast("Pasting is disabled. Please answer in your own words.");
+    setTimeout(() => setToast(null), 3000);
+  }
+
   return (
-    <Page wide>
-      <h1 className="text-2xl sm:text-3xl font-bold text-slate-800 mb-6">Review</h1>
-      <Summary />
-      <div className="mt-6 flex justify-end"><Btn kind="green" onClick={() => go("done")}>Finish</Btn></div>
-    </Page>
+    <>
+      <Notice s={s} update={update} />
+      <Page wide>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <p className="text-sm font-semibold text-indigo-700">Step 4: Check the statements ({i + 1} of {NS})</p>
+          <TimeLeft s={s} label="Time left" />
+        </div>
+        {i === 0 && !item.text && <Card className="p-5 mb-4 bg-indigo-50/60 text-slate-700 leading-relaxed">{C.control.errorIntro}</Card>}
+        <Card className="mb-4 overflow-hidden"><ProblemCard title={C.catProblem.title} text={C.catProblem.text} /></Card>
+        <Card className="p-6">
+          <p className="text-xs font-bold uppercase tracking-wide text-amber-800 mb-2">Statement {i + 1}: {st.category}</p>
+          <blockquote className="border-l-4 border-amber-400 bg-amber-50 rounded-r-lg px-4 py-3 text-slate-800 leading-relaxed mb-4">“{st.text}”</blockquote>
+          <NoPasteArea value={item.text} rows={5} disabled={item.submitted} onPasteBlocked={pasteBlocked}
+            onChange={(v) => update((d) => { d.ctl.eitems[i].text = v; })}
+            placeholder="Is this statement correct? If not, what is wrong, and what is correct?" />
+          {toast && <p className="text-sm text-amber-700 mt-2">{toast}</p>}
+          {!item.submitted && <HintBox hints={st.textbookHints} used={item.hints} onMore={hint} />}
+          {item.submitted && (
+            <div className="mt-4 p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
+              <p className="font-bold text-emerald-800 mb-1">Solution</p>
+              <p className="text-slate-700 leading-relaxed mb-2"><b>What is wrong:</b> {st.mistake}</p>
+              <p className="text-slate-700 leading-relaxed"><b>Correct:</b> {st.correction}</p>
+            </div>
+          )}
+          <div className="flex justify-end mt-6 pt-4 border-t">
+            {!item.submitted
+              ? <Btn disabled={item.text.trim().length < 15} onClick={submit}>Submit answer</Btn>
+              : <Btn kind="green" onClick={next}>{last ? "Continue" : "Next statement"}</Btn>}
+          </div>
+        </Card>
+      </Page>
+    </>
+  );
+}
+
+function SummaryScreen({ s, update, go }) {
+  return (
+    <>
+      <Notice s={s} update={update} />
+      <Page wide>
+        <h1 className="text-2xl sm:text-3xl font-bold text-slate-800 mb-6">Review</h1>
+        <Summary />
+        <div className="mt-6 flex justify-end"><Btn kind="green" onClick={() => go("done")}>Finish</Btn></div>
+      </Page>
+    </>
   );
 }
 
@@ -673,7 +934,7 @@ function AdminScreen() {
 }
 
 // ==================================================================
-// App: routing between phases
+// App: routing between phases, timers, logging
 // ==================================================================
 function App() {
   if (params.get("admin")) return <AdminScreen />;
@@ -700,7 +961,7 @@ function Study({ pid, group, code }) {
       window.history.replaceState(null, "", location.href.replace(/&reset=1/, ""));
     }
     const old = loadState(pid);
-    return old && old.group === group ? old : freshState(pid, group, code);
+    return old && old.group === group && old.v === C.version ? old : freshState(pid, group, code);
   });
   const sRef = useRef(s); sRef.current = s;
   const log = useCallback((type, data) => makeLogger(sRef.current)(type, data), []);
@@ -715,9 +976,37 @@ function Study({ pid, group, code }) {
   }, []);
 
   const go = useCallback((phase) => {
-    update((d) => { d.phase = phase; d.phaseStarts[phase] = now(); });
+    update((d) => { d.phase = phase; d.phaseStarts[phase] = now(); d.notice = null; });
     window.scrollTo(0, 0);
   }, [update]);
+
+  // Timers: tick every second; when a phase's time is up, move on.
+  const [, setTick] = useState(0);
+  const timedOut = useRef({});
+  useEffect(() => {
+    const h = setInterval(() => {
+      setTick((x) => x + 1);
+      const cur = sRef.current;
+      const left = secondsLeft(cur);
+      if (left === 0 && !timedOut.current[cur.phase]) {
+        const phase = cur.phase;
+        timedOut.current[phase] = true;
+        const next = NEXT_ON_TIMEOUT[phase] || (cur.group === "ai" ? "teach" : "c_teach");
+        update((d) => {
+          const t = now();
+          const close = (p) => { if (!p.outcome) { p.outcome = p.start ? "timeout" : "not_reached"; p.start = p.start || t; p.end = t; } else if (!p.end) p.end = t; };
+          if (phase === "teach") d.topics.forEach(close);
+          if (phase === "error") { d.err.items.forEach(close); d.err.done = true; }
+          if (phase === "c_teach") d.ctl.items.forEach(close);
+          if (phase === "c_error") d.ctl.eitems.forEach(close);
+          d.phase = next; d.phaseStarts[next] = t; d.notice = TIMEOUT_NOTICE[phase];
+        });
+        log("timeout", { part: phase });
+        window.scrollTo(0, 0);
+      }
+    }, 1000);
+    return () => clearInterval(h);
+  }, []);
 
   // Log every phase change, and refresh the session summary row whenever
   // a phase or a part changes (the Apps Script upserts it by sid).
@@ -728,7 +1017,8 @@ function Study({ pid, group, code }) {
   }, [s.phase]);
   useEffect(() => {
     log("summary", { summary: JSON.stringify(buildSummary(s)) });
-  }, [s.phase, s.topicIdx, s.err.outcome, s.control.idx, s.topics.map((t) => t.outcome).join()]);
+  }, [s.phase, s.topicIdx, s.err.idx, s.err.done, s.ctl.idx, s.ctl.eidx,
+      s.topics.map((t) => t.outcome).join(), s.ctl.eitems.map((t) => t.submitted).join()]);
 
   useEffect(() => {
     saveState(s);
@@ -744,16 +1034,16 @@ function Study({ pid, group, code }) {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
-  const props = { s, update, log, go };
+  const props = { s, sRef, update, log, go };
   const screen = {
     consent: <ConsentScreen {...props} />,
     intro: <IntroScreen {...props} />,
     material: <MaterialScreen {...props} />,
-    teach: <ChatScreen key={"t" + s.topicIdx} {...props} />,
-    error: <ChatScreen key="err" {...props} />,
+    teach: <TeachChat key={"t" + s.topicIdx} {...props} />,
+    error: <StatementChat key="err" {...props} />,
     feedback: <FeedbackScreen {...props} />,
-    c_teach: <ControlTeachScreen key={"c" + s.control.idx} {...props} />,
-    c_error: <ControlErrorScreen {...props} />,
+    c_teach: <ControlTeachScreen key={"c" + s.ctl.idx} {...props} />,
+    c_error: <ControlErrorScreen key={"e" + s.ctl.eidx} {...props} />,
     summary: <SummaryScreen {...props} />,
     done: <DoneScreen {...props} />
   }[s.phase];
