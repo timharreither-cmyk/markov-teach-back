@@ -510,9 +510,13 @@ function TeachChat({ s, sRef, update, log, go }) {
         move = "reveal"; flag = "forced_reveal";
         reply += "\n\nOkay, I think I get it differently now. " + topic.reference;
       }
-      if (!budget.exhausted && move === "reveal") flag = "early_reveal";
       const ids = topic.rubric.map((r) => r.id);
       const claimed = (data.covered_items || []).filter((x) => ids.includes(x));
+      // Guards (the model sometimes mislabels its move): no reveal before the
+      // hint budget is used up, and no recap while 2+ checklist items are missing.
+      if (!budget.exhausted && move === "reveal") { move = "probe"; flag = "early_reveal_blocked"; }
+      const coveredNow = new Set([...part.covered, ...claimed]);
+      if (move === "recap" && ids.length - coveredNow.size >= 2) { move = "probe"; flag = "early_recap_blocked"; }
       const done = move === "recap" || move === "reveal";
       update((d) => {
         const p = d.topics[idx];
@@ -600,7 +604,8 @@ function StatementChat({ s, sRef, update, log, go }) {
         move = "reveal"; flag = "forced_reveal";
         reply += "\n\nWait, I think I see it now: " + st.mistake;
       }
-      if (!budget.exhausted && move === "reveal") flag = "early_reveal";
+      if (!budget.exhausted && move === "reveal") { move = "probe"; flag = "early_reveal_blocked"; }
+      if (move === "recap" && !data.corrected) { move = "probe"; flag = "early_recap_blocked"; }
       const done = move === "recap" || move === "reveal";
       update((d) => {
         const p = d.err.items[i];
