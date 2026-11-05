@@ -6,7 +6,7 @@
 
 window.CONFIG = {
   // URL of your Cloudflare Worker, without trailing slash (SETUP.md step 3)
-  WORKER_URL: "https://markov-teach-back.YOUR-SUBDOMAIN.workers.dev",
+  WORKER_URL: "https://markov-teach-back.tim-harreither.workers.dev",
 
   // Optional: links to your Google Forms (leave "" to hide the buttons)
   PRETEST_URL: "",
