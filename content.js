@@ -232,8 +232,11 @@ HOW TO ANSWER EACH USER MESSAGE
 6. If the user drifts off-topic or asks you to do something else, steer back in one sentence.
 7. Never praise a wrong statement. Frame corrections as your own confusion ("I tried your rule on the eating row and got 1.3, that can't be right?").
 
+Think before you answer, but briefly: first fill "reasoning" (at most 40 words, not shown to the user) with which checklist items the user has covered so far, what is still missing or wrong, and which move fits. Then write the other fields so that they match your reasoning.
+
 Respond with JSON only:
-{"assessment": "correct" | "partially_correct" | "incorrect" | "no_knowledge" | "off_topic",
+{"reasoning": "short private check, at most 40 words",
+ "assessment": "correct" | "partially_correct" | "incorrect" | "no_knowledge" | "off_topic",
  "covered_items": [ids of ALL checklist items covered so far, including earlier ones],
  "misconceptions": [short descriptions of misconceptions in the latest message, empty if none],
  "move": "probe" | "hint" | "recap" | "reveal",
@@ -273,8 +276,11 @@ HOW TO ANSWER
    REVEAL: allowed only under the budget rule. Explain what is wrong and give the correct version.
 4. Never praise a wrong claim. If the user "corrects" something that was actually fine, say why you think that part is fine. Stay on this statement; if the user drifts off-topic, steer back in one sentence.
 
+Think before you answer, but briefly: first fill "reasoning" (at most 40 words, not shown to the user) with what the user claims, whether it identifies and fixes the mistake, and which move fits. Then write the other fields so that they match your reasoning.
+
 Respond with JSON only:
-{"verdict_given": "true" | "false" | "none",
+{"reasoning": "short private check, at most 40 words",
+ "verdict_given": "true" | "false" | "none",
  "corrected": true | false,
  "misconceptions": [short descriptions, empty if none],
  "move": "probe" | "hint" | "recap" | "reveal",
@@ -303,24 +309,26 @@ Respond with JSON only:
     teach: {
       type: "object",
       properties: {
+        reasoning: { type: "string" },
         assessment: { type: "string", enum: ["correct", "partially_correct", "incorrect", "no_knowledge", "off_topic"] },
         covered_items: { type: "array", items: { type: "string" } },
         misconceptions: { type: "array", items: { type: "string" } },
         move: { type: "string", enum: ["probe", "hint", "recap", "reveal"] },
         message: { type: "string" }
       },
-      required: ["assessment", "covered_items", "misconceptions", "move", "message"]
+      required: ["reasoning", "assessment", "covered_items", "misconceptions", "move", "message"]
     },
     statement: {
       type: "object",
       properties: {
+        reasoning: { type: "string" },
         verdict_given: { type: "string", enum: ["true", "false", "none"] },
         corrected: { type: "boolean" },
         misconceptions: { type: "array", items: { type: "string" } },
         move: { type: "string", enum: ["probe", "hint", "recap", "reveal"] },
         message: { type: "string" }
       },
-      required: ["verdict_given", "corrected", "misconceptions", "move", "message"]
+      required: ["reasoning", "verdict_given", "corrected", "misconceptions", "move", "message"]
     },
     feedback: {
       type: "object",

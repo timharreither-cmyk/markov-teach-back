@@ -531,7 +531,7 @@ function TeachChat({ s, sRef, update, log, go }) {
         part: topic.id, role: "sam", text: reply, turn: turns, move,
         assessment: data.assessment || "", hint_count: part.hints + (move === "hint" ? 1 : 0),
         covered: claimed.join(" "), misconceptions: (data.misconceptions || []).join(" | "),
-        latency_ms: latency, model, flag
+        latency_ms: latency, model, flag, reasoning: String(data.reasoning || "")
       });
       if (done) log("part_end", { part: topic.id, outcome: move });
     } catch (e) {
@@ -629,7 +629,7 @@ function StatementChat({ s, sRef, update, log, go }) {
         part: st.id, role: "sam", text: reply, turn: turns, move,
         assessment: data.verdict_given || "", hint_count: item.hints + (move === "hint" ? 1 : 0),
         covered: data.corrected ? "corrected" : "", misconceptions: (data.misconceptions || []).join(" | "),
-        latency_ms: latency, model, flag
+        latency_ms: latency, model, flag, reasoning: String(data.reasoning || "")
       });
       if (done) log("part_end", { part: st.id, outcome: move });
     } catch (e) {
